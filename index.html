@@ -709,24 +709,51 @@ var CONFIG = {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     return t;
   }
+  var glLog = [];
+  function dbg(m) { glLog.push(String(m)); if (window.console) console.warn('[gl] ' + m); showDebug(); }
+  function showDebug() {
+    if (!/[?&]debug/.test(location.search)) return;
+    var d = document.getElementById('dbgBox');
+    if (!d) {
+      d = document.createElement('pre'); d.id = 'dbgBox';
+      d.style.cssText = 'position:fixed;left:0;right:0;bottom:0;max-height:45%;overflow:auto;margin:0;padding:8px 10px;z-index:99999;background:rgba(0,0,0,.85);color:#9f9;font:11px/1.35 monospace;white-space:pre-wrap;pointer-events:none';
+      document.body.appendChild(d);
+    }
+    d.textContent = glLog.join('\n');
+  }
+  function tryProg(name, vs, fs, attrs) {
+    try { return prog(vs, fs, attrs); } catch (err) { dbg(name + ' FAILED: ' + (err && err.message)); return null; }
+  }
   function initGL() {
-    var opts = { antialias: false, alpha: false, depth: false, stencil: false, powerPreference: 'high-performance', preserveDrawingBuffer: false };
-    gl = cv.getContext('webgl', opts) || cv.getContext('experimental-webgl', opts);
-    if (!gl) { glOK = false; return false; }
+    var sets = [
+      { antialias: false, alpha: false, depth: false, stencil: false, powerPreference: 'high-performance', preserveDrawingBuffer: false },
+      { antialias: false, alpha: false, depth: false, stencil: false },
+      {}
+    ], k;
+    gl = null;
+    for (k = 0; k < sets.length && !gl; k++) {
+      try { gl = cv.getContext('webgl', sets[k]) || cv.getContext('experimental-webgl', sets[k]); } catch (e0) { dbg('getContext: ' + e0.message); }
+    }
+    if (!gl) { dbg('WebGL context is null'); glOK = false; return false; }
     try {
-      pP = prog(VS_P, FS_P, ['aPos', 'aCol', 'aSzPh']);
-      pH = prog(VS_H, FS_P, ['aT', 'aJit', 'aCol', 'aSzPh', 'aOrd']);
-      pQ = prog(VS_Q, FS_Q, ['aQ']);
+      var dbi = gl.getExtension('WEBGL_debug_renderer_info');
+      dbg('GPU: ' + (dbi ? gl.getParameter(dbi.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER)) + ' | ' + gl.getParameter(gl.VERSION));
+      pP = tryProg('stars', VS_P, FS_P, ['aPos', 'aCol', 'aSzPh']);
+      pH = tryProg('heart', VS_H, FS_P, ['aT', 'aJit', 'aCol', 'aSzPh', 'aOrd']);
+      pQ = tryProg('nebula', VS_Q, FS_Q, ['aQ']);
+      if (!pP) throw new Error('star program missing');
       var r = gl.getParameter(gl.ALIASED_POINT_SIZE_RANGE);
       maxPt = r && r[1] ? r[1] : 64;
+      dbg('point size max: ' + maxPt);
       B.star = vbo(D.star); B.dust = vbo(D.dust); B.halo = vbo(D.halo); B.gal = vbo(D.gal);
       B.heart = vbo(D.heart); B.col = vbo(D.col);
       quadBuf = vbo(new Float32Array([-1, -1, 1, -1, -1, 1, -1, 1, 1, -1, 1, 1]));
-      nebTex = makeNebTex();
+      try { nebTex = makeNebTex(); } catch (e1) { dbg('nebula texture: ' + e1.message); nebTex = null; }
       glOK = true;
     } catch (err) {
-      if (window.console) console.error(err);
+      dbg('initGL: ' + (err && err.message));
       glOK = false;
+      try { var nc = cv.cloneNode(false); cv.parentNode.replaceChild(nc, cv); cv = nc; sizeCanvas(cv); } catch (e5) {}
     }
     return glOK;
   }
@@ -753,6 +780,7 @@ var CONFIG = {
     gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE);
     var i;
     // nebula
+    if (pQ && nebTex) {
     gl.useProgram(pQ); attribs(1);
     gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
     gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, nebTex); gl.uniform1i(pQ.u('uTex'), 0);
@@ -768,6 +796,7 @@ var CONFIG = {
       gl.uniform3f(pQ.u('uCol'), n.col[0], n.col[1], n.col[2]);
       gl.uniform1f(pQ.u('uA'), al);
       gl.drawArrays(gl.TRIANGLES, 0, 6);
+    }
     }
     // point groups
     gl.useProgram(pP); attribs(3);
@@ -789,7 +818,7 @@ var CONFIG = {
     drawP(B.halo, COUNT.halo, galSpin * .6, GAIN.halo * cam.gA, .15, 1);
     drawP(B.gal, COUNT.gal, galSpin, GAIN.gal * cam.gA, .2, 1);
     // heart + column
-    if (formV > .002) {
+    if (pH && formV > .002) {
       gl.useProgram(pH); attribs(5);
       gl.uniformMatrix4fv(pH.u('uVP'), false, VP);
       gl.uniform1f(pH.u('uTime'), t); gl.uniform1f(pH.u('uPx'), DPR); gl.uniform1f(pH.u('uMaxPt'), maxPt);
@@ -998,10 +1027,15 @@ var CONFIG = {
       if (lod > .6) lod = Math.max(.6, lod - .15);
       else if (renderScale > .72) { renderScale *= .88; resize(); }
     }
-    updateCamera(dt);
-    if (glOK) render(tNow, dt); else renderFallback(tNow);
-    updateOverlays(tNow);
-    fxStep(dt);
+    try { updateCamera(dt); } catch (e1) { dbg('camera: ' + e1.message); }
+    try {
+      if (glOK) {
+        render(tNow, dt);
+        if (frames === 3) { var ge = gl.getError(); if (ge) dbg('gl.getError after 3 frames: 0x' + ge.toString(16)); }
+      } else renderFallback(tNow);
+    } catch (e2) { dbg('render: ' + e2.message); glOK = false; }
+    try { updateOverlays(tNow); } catch (e3) { dbg('overlays: ' + e3.message); }
+    try { fxStep(dt); } catch (e4) { dbg('fx: ' + e4.message); }
     requestAnimationFrame(frame);
   }
 
